@@ -1,0 +1,43 @@
+services:
+  lvi-mcp:
+    build: .
+    # For interactive stdio testing:
+    #   docker compose run --rm lvi-mcp
+    #
+    # For SSE/HTTP transport (mcp dev / inspector):
+    #   docker compose --profile sse up
+    stdin_open: true
+    tty: false
+    volumes:
+      # Mount a local IFC files directory so tools can access files by path
+      - ./ifc_files:/ifc_files:ro
+    environment:
+      - MCP_TRANSPORT=stdio
+    # Memory limit: IfcOpenShell loads the full model into memory.
+    # A 200 MB IFC can use 1–2 GB RAM. Adjust as needed for your models.
+    mem_limit: 4g
+    memswap_limit: 4g
+    restart: on-failure
+
+  # SSE profile: exposes the server on port 8000 for MCP Inspector / HTTP clients
+  lvi-mcp-sse:
+    build: .
+    profiles: [sse]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ifc_files:/ifc_files:ro
+    environment:
+      - MCP_TRANSPORT=sse
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+    mem_limit: 4g
+    memswap_limit: 4g
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/sse')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    command: ["python", "-m", "lvi_mcp.server", "--transport", "sse", "--host", "0.0.0.0", "--port", "8000"]
