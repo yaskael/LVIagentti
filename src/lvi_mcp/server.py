@@ -8,6 +8,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from lvi_mcp.models import (
+    AutoEnrichInput,
+    BatchClassifyInput,
     ClassifyIfcElementInput,
     EnrichIfcInput,
     ExtractIfcPropertiesInput,
@@ -19,6 +21,8 @@ from lvi_mcp.models import (
 )
 from lvi_mcp.tools.ifc_tools import extract_ifc_properties, parse_ifc_elements
 from lvi_mcp.tools.lvi_tools import (
+    auto_enrich_ifc,
+    batch_classify_ifc_elements,
     classify_ifc_element,
     enrich_ifc_with_lvi_codes,
     generate_lvi_report,
@@ -122,6 +126,33 @@ def classify_ifc_element_tool(
 
 
 # ---------------------------------------------------------------------------
+# Tool: batch_classify_tool
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def batch_classify_tool(
+    global_ids: list[str],
+    ifc_path: str | None = None,
+    ifc_base64: str | None = None,
+    max_matches_per_element: int = 3,
+) -> str:
+    """Classify multiple IFC elements in a single call.
+
+    Pass a list of GlobalIds to classify all at once instead of one call per element.
+    Returns classification results for each found element plus a list of not_found_ids.
+    max_matches_per_element controls how many LVI code candidates are returned per element.
+    """
+    params = BatchClassifyInput(
+        ifc_path=ifc_path,
+        ifc_base64=ifc_base64,
+        global_ids=global_ids,
+        max_matches_per_element=max_matches_per_element,
+    )
+    result = batch_classify_ifc_elements(params)
+    return _json(result)
+
+
+# ---------------------------------------------------------------------------
 # Tool: validate_lvi_codes
 # ---------------------------------------------------------------------------
 
@@ -140,7 +171,8 @@ def validate_lvi_codes_tool(
     Checks every MEP element for an LVI code in the specified property set/property.
     By default only returns elements with missing or invalid codes (only_invalid=True).
     Set only_invalid=False to include valid elements too.
-    Returns {total, offset, limit, items} with per-element validation status and suggestions.
+    Returns {total, offset, limit, items} with per-element validation status, suggestions,
+    and match_reasoning explaining why each suggestion was proposed.
     """
     params = ValidateLviCodesInput(
         ifc_path=ifc_path,
@@ -205,7 +237,7 @@ def lookup_lvi_code_tool(
 
 
 # ---------------------------------------------------------------------------
-# Tool: enrich_ifc_with_lvi_codes
+# Tool: enrich_ifc
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -216,14 +248,21 @@ def enrich_ifc_tool(
     property_set_name: str = "LVI_Luokitus",
     property_name: str = "LVI_Tuoteosa",
     output_path: str | None = None,
+    dry_run: bool = False,
+    backup: bool = True,
 ) -> str:
-    """Write LVI-TUOTEOSA codes into an IFC model's property sets and return the enriched file.
+    """Write LVI-TUOTEOSA codes into an IFC model's property sets.
 
     Pass a list of assignments, each with "global_id" and "lvi_code" keys.
-    The tool creates or updates the LVI_Luokitus/LVI_Tuoteosa property set on each element.
-    If output_path is given, the enriched IFC is saved there and the path is returned.
-    If output_path is omitted, the enriched IFC is returned as a base64 string.
-    Only valid codelist codes are accepted — invalid codes are skipped and reported.
+    Creates or updates the LVI_Luokitus/LVI_Tuoteosa property set on each element.
+    Only valid codelist codes are accepted; invalid codes are reported in skipped_invalid_code.
+    Elements not found in the model are reported in skipped_not_found.
+
+    Output behaviour:
+    - If output_path is given, saves there (backs up existing file if backup=True).
+    - If output_path is omitted and ifc_path was used, auto-saves as <stem>_enriched.ifc.
+    - If ifc_base64 was used and output_path is omitted, returns base64.
+    - If dry_run=True, validates and counts assignments without writing any file.
     """
     parsed_assignments = [LviCodeAssignment(**a) for a in assignments]
     params = EnrichIfcInput(
@@ -233,8 +272,57 @@ def enrich_ifc_tool(
         property_set_name=property_set_name,
         property_name=property_name,
         output_path=output_path,
+        dry_run=dry_run,
+        backup=backup,
     )
     result = enrich_ifc_with_lvi_codes(params)
+    return _json(result)
+
+
+# ---------------------------------------------------------------------------
+# Tool: auto_enrich_ifc
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def auto_enrich_ifc_tool(
+    ifc_path: str | None = None,
+    ifc_base64: str | None = None,
+    property_set_name: str = "LVI_Luokitus",
+    property_name: str = "LVI_Tuoteosa",
+    min_score: float = 0.7,
+    overwrite_existing: bool = False,
+    output_path: str | None = None,
+    dry_run: bool = False,
+    backup: bool = True,
+) -> str:
+    """Classify all unclassified MEP elements and enrich the IFC model in one call.
+
+    Finds every element without a valid LVI code, classifies it against the codelist,
+    and writes the top match if its confidence score meets min_score (default 0.7).
+    Elements below min_score are returned in low_confidence_elements for manual review.
+
+    Use dry_run=True first to preview proposals before writing.
+    Set overwrite_existing=True to reclassify elements that already have a code.
+
+    Returns:
+    - auto_assigned_count: elements written (or would be written if dry_run)
+    - low_confidence_count: elements needing manual review
+    - proposals: all auto-assigned entries with code, score, and reasoning
+    - low_confidence_elements: entries that need a human decision
+    - output_path or ifc_base64 for the enriched file (same defaulting as enrich_ifc_tool)
+    """
+    params = AutoEnrichInput(
+        ifc_path=ifc_path,
+        ifc_base64=ifc_base64,
+        property_set_name=property_set_name,
+        property_name=property_name,
+        min_score=min_score,
+        overwrite_existing=overwrite_existing,
+        output_path=output_path,
+        dry_run=dry_run,
+        backup=backup,
+    )
+    result = auto_enrich_ifc(params)
     return _json(result)
 
 
