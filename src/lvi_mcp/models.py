@@ -177,3 +177,43 @@ class LviCodeEntry(BaseModel):
     grandparent_code: str | None
     grandparent_label_fi: str | None
     score: float
+
+
+class LviCodeAssignment(BaseModel):
+    global_id: str
+    """GlobalId of the IFC element to enrich."""
+
+    lvi_code: str
+    """LVI-TUOTEOSA code to assign (e.g. T-LVI-01-01-001)."""
+
+
+class EnrichIfcInput(IfcInputBase):
+    assignments: list[LviCodeAssignment]
+    """List of GlobalId → LVI code pairs to write into the model."""
+
+    property_set_name: str = "LVI_Luokitus"
+    """Property set to write the code into (default: LVI_Luokitus)."""
+
+    property_name: str = "LVI_Tuoteosa"
+    """Property name within the set (default: LVI_Tuoteosa)."""
+
+    output_path: str | None = None
+    """If provided, save the enriched IFC to this absolute path.
+    If omitted, the result is returned as base64."""
+
+
+class EnrichIfcResult(BaseModel):
+    assigned_count: int
+    """Number of elements successfully updated."""
+
+    skipped_count: int
+    """Number of assignments skipped (element not found or invalid code)."""
+
+    skipped_ids: list[str]
+    """GlobalIds that were skipped."""
+
+    output_path: str | None
+    """Absolute path of the saved file, if output_path was provided."""
+
+    ifc_base64: str | None
+    """Base64-encoded enriched IFC content, if no output_path was given."""

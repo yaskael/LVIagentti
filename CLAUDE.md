@@ -19,7 +19,7 @@ src/lvi_mcp/
   models.py       # Pydantic input/output models
   tools/
     ifc_tools.py  # parse_ifc_elements, extract_ifc_properties
-    lvi_tools.py  # classify, validate, report, lookup
+    lvi_tools.py  # classify, validate, report, lookup, enrich
 data/
   codelist_LVI-TUOTEOSA_Versio_1_0.json
 ```
@@ -60,11 +60,19 @@ context window.
 - `generate_lvi_report_tool` caps `unclassified_element_ids` to the first
   N entries (default 50) and includes `unclassified_element_count` for the total.
 
-### Recommended tool call order (summary → drill-down)
+### Recommended tool call order (summary → drill-down → enrich)
 1. `generate_lvi_report_tool` — compact overview (counts + distribution)
 2. `validate_lvi_codes_tool` — only problems, paginated
 3. `classify_ifc_element_tool` — targeted classification of specific elements
 4. `extract_ifc_properties_tool` — deep dive with `pset_names` filter
+5. `enrich_ifc_tool` — write LVI codes back into the model once assignments are confirmed
+
+### Enrichment (write-back)
+- `enrich_ifc_tool` accepts a list of `{global_id, lvi_code}` assignments.
+- Only codes that exist in the codelist are written; unknown codes are skipped and reported.
+- Creates the `LVI_Luokitus` property set on the element if it doesn't exist, otherwise updates it.
+- Returns the modified IFC as `output_path` (saved file) or `ifc_base64` (in-memory).
+- `EnrichIfcResult` always includes `assigned_count`, `skipped_count`, and `skipped_ids`.
 
 ### When adding new tools
 - **Never return unbounded lists.** Always add `offset`/`limit` or a `max_results` cap.

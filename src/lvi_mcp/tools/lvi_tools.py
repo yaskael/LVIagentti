@@ -13,6 +13,8 @@ from lvi_mcp.ifc_parser import (
 from lvi_mcp.models import (
     ClassificationResult,
     ClassifyIfcElementInput,
+    EnrichIfcInput,
+    EnrichIfcResult,
     GenerateLviReportInput,
     LookupLviCodeInput,
     LviCodeEntry,
@@ -266,3 +268,127 @@ def lookup_lvi_code(params: LookupLviCodeInput) -> list[LviCodeEntry]:
     cl = get_codelist()
     results = cl.search(params.query, max_results=params.max_results)
     return [_entry_to_code_entry(entry, score) for entry, score in results]
+
+
+# ---------------------------------------------------------------------------
+# enrich_ifc_with_lvi_codes
+# ---------------------------------------------------------------------------
+
+def enrich_ifc_with_lvi_codes(params: EnrichIfcInput) -> EnrichIfcResult:
+    """Write LVI-TUOTEOSA codes into an IFC model's property sets.
+
+    For each assignment, finds the element by GlobalId and creates or updates
+    the target property set / property with the given LVI code.
+    Returns the enriched IFC as a file path or base64 string.
+    """
+    import base64
+    import tempfile
+
+    import ifcopenshell
+    import ifcopenshell.api
+
+    ifc_file = load_ifc(params.ifc_path, params.ifc_base64)
+    cl = get_codelist()
+
+    assigned_count = 0
+    skipped_ids: list[str] = []
+
+    for assignment in params.assignments:
+        # Validate code exists in codelist
+        if cl.get(assignment.lvi_code) is None:
+            skipped_ids.append(assignment.global_id)
+            continue
+
+        try:
+            element = ifc_file.by_guid(assignment.global_id)
+        except Exception:
+            element = None
+
+        if element is None:
+            skipped_ids.append(assignment.global_id)
+            continue
+
+        # Find existing property set or create a new one
+        existing_pset = None
+        for rel in getattr(element, "IsDefinedBy", []):
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pdef = rel.RelatingPropertyDefinition
+            if pdef.is_a("IfcPropertySet") and pdef.Name == params.property_set_name:
+                existing_pset = pdef
+                break
+
+        if existing_pset is not None:
+            # Update or add the property within the existing pset
+            existing_prop = None
+            for prop in existing_pset.HasProperties:
+                if prop.Name == params.property_name:
+                    existing_prop = prop
+                    break
+
+            if existing_prop is not None:
+                existing_prop.NominalValue = ifc_file.createIfcLabel(assignment.lvi_code)
+            else:
+                new_prop = ifc_file.createIfcPropertySingleValue(
+                    params.property_name,
+                    None,
+                    ifc_file.createIfcLabel(assignment.lvi_code),
+                    None,
+                )
+                existing_pset.HasProperties = list(existing_pset.HasProperties) + [new_prop]
+        else:
+            # Create a new property set and link it to the element
+            new_prop = ifc_file.createIfcPropertySingleValue(
+                params.property_name,
+                None,
+                ifc_file.createIfcLabel(assignment.lvi_code),
+                None,
+            )
+            new_pset = ifc_file.createIfcPropertySet(
+                ifcopenshell.guid.new(),
+                ifc_file.by_type("IfcOwnerHistory")[0] if ifc_file.by_type("IfcOwnerHistory") else None,
+                params.property_set_name,
+                None,
+                [new_prop],
+            )
+            ifc_file.createIfcRelDefinesByProperties(
+                ifcopenshell.guid.new(),
+                ifc_file.by_type("IfcOwnerHistory")[0] if ifc_file.by_type("IfcOwnerHistory") else None,
+                None,
+                None,
+                [element],
+                new_pset,
+            )
+
+        assigned_count += 1
+
+    # Save or encode output
+    if params.output_path:
+        ifc_file.write(params.output_path)
+        return EnrichIfcResult(
+            assigned_count=assigned_count,
+            skipped_count=len(skipped_ids),
+            skipped_ids=skipped_ids,
+            output_path=params.output_path,
+            ifc_base64=None,
+        )
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            ifc_file.write(tmp_path)
+            with open(tmp_path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+        finally:
+            import os
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return EnrichIfcResult(
+            assigned_count=assigned_count,
+            skipped_count=len(skipped_ids),
+            skipped_ids=skipped_ids,
+            output_path=None,
+            ifc_base64=encoded,
+        )

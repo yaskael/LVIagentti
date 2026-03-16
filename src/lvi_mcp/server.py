@@ -9,15 +9,18 @@ from mcp.server.fastmcp import FastMCP
 
 from lvi_mcp.models import (
     ClassifyIfcElementInput,
+    EnrichIfcInput,
     ExtractIfcPropertiesInput,
     GenerateLviReportInput,
     LookupLviCodeInput,
+    LviCodeAssignment,
     ParseIfcElementsInput,
     ValidateLviCodesInput,
 )
 from lvi_mcp.tools.ifc_tools import extract_ifc_properties, parse_ifc_elements
 from lvi_mcp.tools.lvi_tools import (
     classify_ifc_element,
+    enrich_ifc_with_lvi_codes,
     generate_lvi_report,
     lookup_lvi_code,
     validate_lvi_codes,
@@ -199,6 +202,40 @@ def lookup_lvi_code_tool(
     params = LookupLviCodeInput(query=query, max_results=max_results)
     results = lookup_lvi_code(params)
     return _json(results)
+
+
+# ---------------------------------------------------------------------------
+# Tool: enrich_ifc_with_lvi_codes
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def enrich_ifc_tool(
+    assignments: list[dict],
+    ifc_path: str | None = None,
+    ifc_base64: str | None = None,
+    property_set_name: str = "LVI_Luokitus",
+    property_name: str = "LVI_Tuoteosa",
+    output_path: str | None = None,
+) -> str:
+    """Write LVI-TUOTEOSA codes into an IFC model's property sets and return the enriched file.
+
+    Pass a list of assignments, each with "global_id" and "lvi_code" keys.
+    The tool creates or updates the LVI_Luokitus/LVI_Tuoteosa property set on each element.
+    If output_path is given, the enriched IFC is saved there and the path is returned.
+    If output_path is omitted, the enriched IFC is returned as a base64 string.
+    Only valid codelist codes are accepted — invalid codes are skipped and reported.
+    """
+    parsed_assignments = [LviCodeAssignment(**a) for a in assignments]
+    params = EnrichIfcInput(
+        ifc_path=ifc_path,
+        ifc_base64=ifc_base64,
+        assignments=parsed_assignments,
+        property_set_name=property_set_name,
+        property_name=property_name,
+        output_path=output_path,
+    )
+    result = enrich_ifc_with_lvi_codes(params)
+    return _json(result)
 
 
 # ---------------------------------------------------------------------------

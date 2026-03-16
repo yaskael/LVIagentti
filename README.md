@@ -16,6 +16,7 @@ A production-ready Python [MCP](https://modelcontextprotocol.io/) server for Fin
 | `validate_lvi_codes_tool` | Validate LVI codes — paginated, returns only invalid by default (`only_invalid=True`) |
 | `generate_lvi_report_tool` | Summary: counts, code distribution, hierarchy; unclassified IDs capped to avoid token burn |
 | `lookup_lvi_code_tool` | Search the codelist by code, Finnish term, or short name (no IFC needed) |
+| `enrich_ifc_tool` | **Write LVI codes back into the IFC model** — creates/updates `LVI_Luokitus` property sets, returns enriched file |
 
 All list-returning tools are paginated and filter server-side — the AI receives only the data it needs.
 
@@ -162,8 +163,68 @@ IfcOpenShell loads the entire IFC model into memory — there is no streaming. M
 
 ## LVI Code Property Set Convention
 
-By default, validation and reporting tools look for the LVI code in:
+By default, all tools read and write the LVI code from/to:
 - Property set: `LVI_Luokitus`
 - Property name: `LVI_Tuoteosa`
 
-These can be overridden per tool call.
+These can be overridden per tool call via `property_set_name` and `property_name`.
+
+---
+
+## Enriching an IFC Model with LVI Codes
+
+The `enrich_ifc_tool` writes LVI-TUOTEOSA codes directly into an IFC model's property sets.
+
+### Workflow
+
+The recommended approach is to classify first, then enrich:
+
+```
+1. generate_lvi_report_tool   → see which elements are unclassified
+2. classify_ifc_element_tool  → get suggested code(s) for each element
+3. enrich_ifc_tool            → write confirmed codes back into the model
+```
+
+### Example: save enriched file to disk
+
+```json
+{
+  "tool": "enrich_ifc_tool",
+  "arguments": {
+    "ifc_path": "/path/to/model.ifc",
+    "output_path": "/path/to/model_enriched.ifc",
+    "assignments": [
+      {"global_id": "0A1B2C3D4E5F6G7H8I9J0K", "lvi_code": "T-LVI-01-01-001"},
+      {"global_id": "1B2C3D4E5F6G7H8I9J0K1L", "lvi_code": "T-LVI-02-03-005"}
+    ]
+  }
+}
+```
+
+### Example: get result as base64 (no output_path)
+
+```json
+{
+  "tool": "enrich_ifc_tool",
+  "arguments": {
+    "ifc_base64": "<base64-encoded IFC>",
+    "assignments": [
+      {"global_id": "0A1B2C3D4E5F6G7H8I9J0K", "lvi_code": "T-LVI-01-01-001"}
+    ]
+  }
+}
+```
+
+### Response
+
+```json
+{
+  "assigned_count": 2,
+  "skipped_count": 0,
+  "skipped_ids": [],
+  "output_path": "/path/to/model_enriched.ifc",
+  "ifc_base64": null
+}
+```
+
+Elements are skipped if their `global_id` is not found or their `lvi_code` does not exist in the codelist. Skipped IDs are always reported so the AI can retry or flag them.
