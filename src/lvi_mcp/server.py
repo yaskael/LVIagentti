@@ -258,6 +258,10 @@ def enrich_ifc_tool(
     Only valid codelist codes are accepted; invalid codes are reported in skipped_invalid_code.
     Elements not found in the model are reported in skipped_not_found.
 
+    Enrichment chaining: if the resolved output_path already exists (e.g. from a
+    previous auto_enrich or enrich call), the model is loaded from that file so
+    sequential enrichments stack on top of each other instead of losing earlier work.
+
     Output behaviour:
     - If output_path is given, saves there (backs up existing file if backup=True).
     - If output_path is omitted and ifc_path was used, auto-saves as <stem>_enriched.ifc.
@@ -291,6 +295,7 @@ def auto_enrich_ifc_tool(
     property_name: str = "LVI_Tuoteosa",
     min_score: float = 0.7,
     overwrite_existing: bool = False,
+    exclude_global_ids: list[str] | None = None,
     output_path: str | None = None,
     dry_run: bool = False,
     backup: bool = True,
@@ -303,6 +308,11 @@ def auto_enrich_ifc_tool(
 
     Use dry_run=True first to preview proposals before writing.
     Set overwrite_existing=True to reclassify elements that already have a code.
+    Pass exclude_global_ids to skip elements already classified by a previous call
+    (e.g. IDs from validate_lvi_codes_tool results) and avoid redundant work.
+
+    Enrichment chaining: if the resolved output_path already exists from a previous
+    enrich call, the model is loaded from that file so sequential enrichments stack.
 
     Returns:
     - auto_assigned_count: elements written (or would be written if dry_run)
@@ -318,6 +328,7 @@ def auto_enrich_ifc_tool(
         property_name=property_name,
         min_score=min_score,
         overwrite_existing=overwrite_existing,
+        exclude_global_ids=exclude_global_ids,
         output_path=output_path,
         dry_run=dry_run,
         backup=backup,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from lvi_mcp.codelist import CodeEntry, get_codelist
 from lvi_mcp.ifc_parser import (
     get_element_info,
@@ -9,6 +11,8 @@ from lvi_mcp.ifc_parser import (
     get_property_sets,
     iter_mep_elements,
     load_ifc,
+    resolve_output_path,
+    write_ifc,
 )
 from lvi_mcp.models import (
     AutoEnrichInput,
@@ -69,6 +73,78 @@ def _collect_element_text_props(element: object) -> dict[str, str]:
             if isinstance(v, str):
                 props[k] = v
     return props
+
+
+def _apply_lvi_assignment(
+    ifc_file: object,
+    element: object,
+    lvi_code: str,
+    pset_name: str,
+    prop_name: str,
+) -> None:
+    """Create or update a property set entry on an IFC element."""
+    import ifcopenshell  # type: ignore
+
+    existing_pset = None
+    for rel in getattr(element, "IsDefinedBy", []):
+        if not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        pdef = rel.RelatingPropertyDefinition
+        if pdef.is_a("IfcPropertySet") and pdef.Name == pset_name:
+            existing_pset = pdef
+            break
+
+    owner_histories = ifc_file.by_type("IfcOwnerHistory")  # type: ignore[attr-defined]
+    owner_history = owner_histories[0] if owner_histories else None
+
+    if existing_pset is not None:
+        existing_prop = None
+        for prop in existing_pset.HasProperties:
+            if prop.Name == prop_name:
+                existing_prop = prop
+                break
+        if existing_prop is not None:
+            existing_prop.NominalValue = ifc_file.createIfcLabel(lvi_code)  # type: ignore[attr-defined]
+        else:
+            new_prop = ifc_file.createIfcPropertySingleValue(  # type: ignore[attr-defined]
+                prop_name, None, ifc_file.createIfcLabel(lvi_code), None  # type: ignore[attr-defined]
+            )
+            existing_pset.HasProperties = list(existing_pset.HasProperties) + [new_prop]
+    else:
+        new_prop = ifc_file.createIfcPropertySingleValue(  # type: ignore[attr-defined]
+            prop_name, None, ifc_file.createIfcLabel(lvi_code), None  # type: ignore[attr-defined]
+        )
+        new_pset = ifc_file.createIfcPropertySet(  # type: ignore[attr-defined]
+            ifcopenshell.guid.new(), owner_history, pset_name, None, [new_prop]
+        )
+        ifc_file.createIfcRelDefinesByProperties(  # type: ignore[attr-defined]
+            ifcopenshell.guid.new(), owner_history, None, None, [element], new_pset
+        )
+
+
+def _load_for_enrichment(
+    ifc_path: str | None,
+    ifc_base64: str | None,
+    output_path: str | None,
+) -> object:
+    """Load the IFC file for enrichment, chaining from a previous enrichment if available.
+
+    If *output_path* resolves to an existing file that differs from *ifc_path*,
+    we load from that file so that sequential enrich calls stack on top of each
+    other instead of silently discarding earlier enrichments.
+    """
+    resolved = resolve_output_path(ifc_path, output_path)
+
+    if (
+        resolved
+        and ifc_path
+        and os.path.abspath(resolved) != os.path.abspath(ifc_path)
+        and os.path.isfile(resolved)
+    ):
+        # A previous enrichment already produced this file — chain from it.
+        return load_ifc(resolved, None)
+
+    return load_ifc(ifc_path, ifc_base64)
 
 
 # ---------------------------------------------------------------------------
@@ -325,103 +401,17 @@ def lookup_lvi_code(params: LookupLviCodeInput) -> list[LviCodeEntry]:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_output_path  (shared helper)
-# ---------------------------------------------------------------------------
-
-def _resolve_output_path(ifc_path: str | None, output_path: str | None) -> str | None:
-    """Auto-generate <stem>_enriched.ifc when ifc_path is known and output_path is omitted."""
-    if output_path is not None:
-        return output_path
-    if ifc_path:
-        from pathlib import Path
-        p = Path(ifc_path)
-        return str(p.with_stem(p.stem + "_enriched"))
-    return None
-
-
-def _write_ifc(ifc_file: object, output_path: str | None, backup: bool) -> tuple[str | None, str | None]:
-    """Write IFC to output_path (with optional backup) or encode as base64.
-
-    Returns (output_path, ifc_base64).
-    """
-    import base64
-    import os
-    import tempfile
-
-    if output_path:
-        if backup and os.path.exists(output_path):
-            os.rename(output_path, output_path + ".bak")
-        ifc_file.write(output_path)  # type: ignore[attr-defined]
-        return output_path, None
-
-    with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        ifc_file.write(tmp_path)  # type: ignore[attr-defined]
-        with open(tmp_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("ascii")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-    return None, encoded
-
-
-def _apply_lvi_assignment(
-    ifc_file: object,
-    element: object,
-    lvi_code: str,
-    pset_name: str,
-    prop_name: str,
-) -> None:
-    """Create or update a property set entry on an IFC element."""
-    import ifcopenshell  # type: ignore
-
-    existing_pset = None
-    for rel in getattr(element, "IsDefinedBy", []):
-        if not rel.is_a("IfcRelDefinesByProperties"):
-            continue
-        pdef = rel.RelatingPropertyDefinition
-        if pdef.is_a("IfcPropertySet") and pdef.Name == pset_name:
-            existing_pset = pdef
-            break
-
-    owner_histories = ifc_file.by_type("IfcOwnerHistory")  # type: ignore[attr-defined]
-    owner_history = owner_histories[0] if owner_histories else None
-
-    if existing_pset is not None:
-        existing_prop = None
-        for prop in existing_pset.HasProperties:
-            if prop.Name == prop_name:
-                existing_prop = prop
-                break
-        if existing_prop is not None:
-            existing_prop.NominalValue = ifc_file.createIfcLabel(lvi_code)  # type: ignore[attr-defined]
-        else:
-            new_prop = ifc_file.createIfcPropertySingleValue(  # type: ignore[attr-defined]
-                prop_name, None, ifc_file.createIfcLabel(lvi_code), None  # type: ignore[attr-defined]
-            )
-            existing_pset.HasProperties = list(existing_pset.HasProperties) + [new_prop]
-    else:
-        new_prop = ifc_file.createIfcPropertySingleValue(  # type: ignore[attr-defined]
-            prop_name, None, ifc_file.createIfcLabel(lvi_code), None  # type: ignore[attr-defined]
-        )
-        new_pset = ifc_file.createIfcPropertySet(  # type: ignore[attr-defined]
-            ifcopenshell.guid.new(), owner_history, pset_name, None, [new_prop]
-        )
-        ifc_file.createIfcRelDefinesByProperties(  # type: ignore[attr-defined]
-            ifcopenshell.guid.new(), owner_history, None, None, [element], new_pset
-        )
-
-
-# ---------------------------------------------------------------------------
 # enrich_ifc_with_lvi_codes
 # ---------------------------------------------------------------------------
 
 def enrich_ifc_with_lvi_codes(params: EnrichIfcInput) -> EnrichIfcResult:
-    """Write LVI-TUOTEOSA codes into an IFC model's property sets."""
-    ifc_file = load_ifc(params.ifc_path, params.ifc_base64)
+    """Write LVI-TUOTEOSA codes into an IFC model's property sets.
+
+    When the resolved output_path already exists (e.g. from a previous
+    auto_enrich call), the model is loaded from *that* file so that
+    sequential enrichments chain correctly.
+    """
+    ifc_file = _load_for_enrichment(params.ifc_path, params.ifc_base64, params.output_path)
     cl = get_codelist()
 
     assigned_count = 0
@@ -460,8 +450,8 @@ def enrich_ifc_with_lvi_codes(params: EnrichIfcInput) -> EnrichIfcResult:
             dry_run=True,
         )
 
-    output_path = _resolve_output_path(params.ifc_path, params.output_path)
-    out_path, ifc_b64 = _write_ifc(ifc_file, output_path, params.backup)
+    output_path = resolve_output_path(params.ifc_path, params.output_path)
+    out_path, ifc_b64 = write_ifc(ifc_file, output_path, params.backup)
 
     return EnrichIfcResult(
         assigned_count=assigned_count,
@@ -479,10 +469,16 @@ def enrich_ifc_with_lvi_codes(params: EnrichIfcInput) -> EnrichIfcResult:
 # ---------------------------------------------------------------------------
 
 def auto_enrich_ifc(params: AutoEnrichInput) -> AutoEnrichResult:
-    """Classify all unclassified MEP elements and enrich the model in one call."""
-    ifc_file = load_ifc(params.ifc_path, params.ifc_base64)
+    """Classify all unclassified MEP elements and enrich the model in one call.
+
+    When the resolved output_path already exists, loads from it to chain
+    with previous enrichments.
+    """
+    ifc_file = _load_for_enrichment(params.ifc_path, params.ifc_base64, params.output_path)
     cl = get_codelist()
     elements = iter_mep_elements(ifc_file)
+
+    exclude_set = set(params.exclude_global_ids) if params.exclude_global_ids else set()
 
     proposals: list[AutoEnrichProposal] = []
     low_confidence: list[AutoEnrichProposal] = []
@@ -490,6 +486,11 @@ def auto_enrich_ifc(params: AutoEnrichInput) -> AutoEnrichResult:
 
     for element in elements:
         info = get_element_info(element)
+
+        # Skip explicitly excluded elements
+        if info["global_id"] in exclude_set:
+            continue
+
         current_code = get_lvi_code_from_element(
             element, params.property_set_name, params.property_name
         )
@@ -544,7 +545,8 @@ def auto_enrich_ifc(params: AutoEnrichInput) -> AutoEnrichResult:
         else:
             low_confidence.append(proposal)
 
-    if params.dry_run or not proposals:
+    # --- dry_run: never write ---
+    if params.dry_run:
         return AutoEnrichResult(
             total_unclassified=total_unclassified,
             auto_assigned_count=len(proposals),
@@ -556,8 +558,22 @@ def auto_enrich_ifc(params: AutoEnrichInput) -> AutoEnrichResult:
             dry_run=True,
         )
 
-    output_path = _resolve_output_path(params.ifc_path, params.output_path)
-    out_path, ifc_b64 = _write_ifc(ifc_file, output_path, params.backup)
+    # --- nothing to write (no proposals met threshold) ---
+    if not proposals:
+        return AutoEnrichResult(
+            total_unclassified=total_unclassified,
+            auto_assigned_count=0,
+            low_confidence_count=len(low_confidence),
+            proposals=[],
+            low_confidence_elements=low_confidence,
+            output_path=None,
+            ifc_base64=None,
+            dry_run=False,
+        )
+
+    # --- write enriched file ---
+    output_path = resolve_output_path(params.ifc_path, params.output_path)
+    out_path, ifc_b64 = write_ifc(ifc_file, output_path, params.backup)
 
     return AutoEnrichResult(
         total_unclassified=total_unclassified,
