@@ -135,6 +135,10 @@ class AutoEnrichInput(IfcInputBase):
     overwrite_existing: bool = False
     """If False (default), skip elements that already have a valid LVI code."""
 
+    exclude_global_ids: list[str] | None = None
+    """GlobalIds to skip entirely (e.g. elements already validated/classified by a
+    previous tool call). Avoids redundant reclassification."""
+
     output_path: str | None = None
     """Where to save the enriched IFC. Follows the same defaulting logic as enrich_ifc_tool:
     auto-generates <stem>_enriched.ifc when ifc_path is given and output_path is omitted."""
