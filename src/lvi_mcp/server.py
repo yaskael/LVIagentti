@@ -25,7 +25,7 @@ from lvi_mcp.tools.lvi_tools import (
 
 mcp = FastMCP(
     "lvi-mcp",
-    description="Finnish LVI (HVAC) IFC classification using the LVI-TUOTEOSA product codelist.",
+    instructions="Finnish LVI (HVAC) IFC classification using the LVI-TUOTEOSA product codelist.",
 )
 
 
