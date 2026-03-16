@@ -2,7 +2,7 @@
 
 A production-ready Python [MCP](https://modelcontextprotocol.io/) server for Finnish HVAC/MEP IFC file analysis, using the national **LVI-TUOTEOSA** product codelist (RYTJ).
 
-**LVI** = Lämmitys (Heating) · Vesi (Plumbing) · Ilmastointi (Ventilation)
+**LVI** = Lämmitys (Heating) / Vesi (Plumbing) / Ilmastointi (Ventilation)
 
 ---
 
@@ -13,14 +13,33 @@ A production-ready Python [MCP](https://modelcontextprotocol.io/) server for Fin
 | `parse_ifc_elements_tool` | List MEP/HVAC elements — paginated (`offset`, `limit`), filterable by IFC type |
 | `extract_ifc_properties_tool` | Property sets for one element — filter by `pset_names` to save tokens |
 | `classify_ifc_element_tool` | Match one element to the best LVI-TUOTEOSA code with confidence scores |
-| `batch_classify_tool` | **Classify multiple elements in one call** — pass a list of GlobalIds |
+| `batch_classify_tool` | Classify multiple elements in one call — pass a list of GlobalIds |
 | `validate_lvi_codes_tool` | Validate LVI codes — paginated, returns only invalid by default; includes `match_reasoning` |
 | `generate_lvi_report_tool` | Summary: counts, code distribution, hierarchy; unclassified IDs capped to avoid token burn |
 | `lookup_lvi_code_tool` | Search the codelist by code, Finnish term, or short name (no IFC needed) |
-| `enrich_ifc_tool` | **Write LVI codes back into the IFC model** — dry-run preview, backup, split skip reasons |
-| `auto_enrich_ifc_tool` | **Classify + enrich all unclassified elements in one call** — auto-assigns high-confidence codes |
+| `enrich_ifc_tool` | Write LVI codes back into the IFC model — dry-run preview, backup, enrichment chaining |
+| `auto_enrich_ifc_tool` | Classify + enrich all unclassified elements in one call — auto-assigns high-confidence codes |
 
 All list-returning tools are paginated and filter server-side — the AI receives only the data it needs.
+
+See [process.md](process.md) for detailed workflow diagrams and data flow descriptions.
+
+---
+
+## Architecture Highlights
+
+### IFC File Cache
+Parsed IFC files are cached by `(path, mtime)` across tool calls. A typical report -> validate -> classify -> enrich workflow on the same file parses it **once** instead of four times. The cache is automatically invalidated after writes.
+
+### Enrichment Chaining
+Both `enrich_ifc_tool` and `auto_enrich_ifc_tool` detect when a previous enrichment already produced the output file and load from **that** file instead of the original. This means `auto_enrich -> enrich` (for low-confidence elements) stacks changes correctly without losing earlier work.
+
+### Token Efficiency
+The server does the heavy lifting so the AI model receives only concise, relevant data:
+- Pagination with `offset`/`limit` on all list-returning tools
+- Server-side filtering (`only_invalid`, `pset_names`, `max_unclassified_ids`)
+- `exclude_global_ids` on `auto_enrich_ifc_tool` to skip elements already classified by `validate_lvi_codes_tool`
+- `batch_classify_tool` replaces N single-element calls with one batch call
 
 ---
 
@@ -138,7 +157,7 @@ mcp call parse_ifc_elements_tool '{"ifc_path": "/path/to/model.ifc", "offset": 5
 
 ## Enriching an IFC Model with LVI Codes
 
-The server supports two enrichment workflows.
+The server supports two enrichment workflows. See [process.md](process.md) for full visual descriptions.
 
 ### Workflow A — Automatic (recommended for first pass)
 
@@ -148,7 +167,8 @@ The server supports two enrichment workflows.
 1. generate_lvi_report_tool   → see scope (how many unclassified)
 2. auto_enrich_ifc_tool       → dry_run=True to preview proposals
 3. auto_enrich_ifc_tool       → dry_run=False to write the file
-4. validate_lvi_codes_tool    → confirm result; review low_confidence_elements manually
+4. enrich_ifc_tool            → manually assign low_confidence_elements (chains automatically)
+5. validate_lvi_codes_tool    → confirm final result
 ```
 
 **Example — preview without writing:**
@@ -163,22 +183,9 @@ The server supports two enrichment workflows.
 }
 ```
 
-**Response:**
-```json
-{
-  "total_unclassified": 142,
-  "auto_assigned_count": 118,
-  "low_confidence_count": 24,
-  "proposals": [...],
-  "low_confidence_elements": [...],
-  "output_path": null,
-  "ifc_base64": null,
-  "dry_run": true
-}
-```
-
 Elements in `low_confidence_elements` need manual review — pass them to `batch_classify_tool`
-and use `enrich_ifc_tool` to write the confirmed assignments.
+and use `enrich_ifc_tool` to write the confirmed assignments. The second enrich call
+automatically loads from `model_enriched.ifc` (the auto-enrich output) so changes stack.
 
 ---
 
@@ -188,66 +195,22 @@ and use `enrich_ifc_tool` to write the confirmed assignments.
 1. generate_lvi_report_tool   → overview
 2. validate_lvi_codes_tool    → see which elements need codes + suggestions with reasoning
 3. batch_classify_tool        → classify groups of elements in one call
-4. enrich_ifc_tool            → dry_run=True to preview, then write
+4. enrich_ifc_tool            → dry_run=True to preview, then dry_run=False to write
 ```
 
-**Example — batch classify:**
-```json
-{
-  "tool": "batch_classify_tool",
-  "arguments": {
-    "ifc_path": "/path/to/model.ifc",
-    "global_ids": ["id1", "id2", "id3"],
-    "max_matches_per_element": 3
-  }
-}
+---
+
+### Workflow C — Hybrid (auto + manual cleanup)
+
 ```
-
-**Example — dry-run enrich:**
-```json
-{
-  "tool": "enrich_ifc_tool",
-  "arguments": {
-    "ifc_path": "/path/to/model.ifc",
-    "dry_run": true,
-    "assignments": [
-      {"global_id": "0A1B2C...", "lvi_code": "T-LVI-01-01-001"},
-      {"global_id": "1B2C3D...", "lvi_code": "T-LVI-02-03-005"}
-    ]
-  }
-}
+1. generate_lvi_report_tool             → overview
+2. validate_lvi_codes_tool              → get invalid IDs + suggestions
+3. auto_enrich_ifc_tool                 → auto-assign high-confidence; pass validated IDs
+     exclude_global_ids=[...]              as exclude_global_ids to skip duplicate work
+4. batch_classify_tool                  → reclassify low_confidence_elements with more options
+5. enrich_ifc_tool                      → manually assign the remaining ones (chains from step 3)
+6. validate_lvi_codes_tool              → final verification
 ```
-
-**Example — write enriched file:**
-```json
-{
-  "tool": "enrich_ifc_tool",
-  "arguments": {
-    "ifc_path": "/path/to/model.ifc",
-    "assignments": [...]
-  }
-}
-```
-
-> When `output_path` is omitted and `ifc_path` was used, the enriched file is automatically
-> saved as `<original_stem>_enriched.ifc` in the same directory. The original is backed up
-> to `.bak` if it already exists.
-
-**EnrichIfcResult fields:**
-```json
-{
-  "assigned_count": 2,
-  "skipped_count": 1,
-  "skipped_not_found": [],
-  "skipped_invalid_code": ["bad-id-here"],
-  "output_path": "/path/to/model_enriched.ifc",
-  "ifc_base64": null,
-  "dry_run": false
-}
-```
-
-`skipped_not_found` = GlobalId not in the IFC model.
-`skipped_invalid_code` = code not in the LVI-TUOTEOSA codelist.
 
 ---
 
@@ -277,7 +240,9 @@ With Docker, the file must be in a mounted volume. See [INSTRUCTIONS.md](INSTRUC
 
 ## Large File Considerations
 
-IfcOpenShell loads the entire IFC model into memory — there is no streaming. Memory usage is typically 5–10× the file size on disk. The Docker container is configured with a 4 GB memory limit by default (adjust `mem_limit` in `docker-compose.yml` for larger models).
+IfcOpenShell loads the entire IFC model into memory — there is no streaming. Memory usage is typically 5-10x the file size on disk. The Docker container is configured with a 4 GB memory limit by default (adjust `mem_limit` in `docker-compose.yml` for larger models).
+
+The IFC file cache (`_IfcCache`) holds up to 4 parsed models in memory. For very large models, this can be significant. The cache uses LRU eviction and validates via `mtime` so stale entries are never served.
 
 ---
 
